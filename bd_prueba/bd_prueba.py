@@ -3,9 +3,13 @@ import asyncio
 import csv
 import datetime
 import functools
+import hashlib
+import hmac
 import io
 import json
+import os
 import re
+import secrets
 from urllib.parse import quote
 
 import qrcode  # type: ignore[reportMissingImports]
@@ -24,6 +28,29 @@ except ImportError:  # type: ignore[reportMissingImports]
 
 class InvalidRowError(Exception):
     """Error para filas CSV inválidas."""
+
+
+def hash_password(password: str) -> str:
+    """Genera un hash PBKDF2 portable sin guardar contraseñas en claro."""
+    salt = secrets.token_bytes(16)
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, 310_000)
+    return f"pbkdf2_sha256$310000${salt.hex()}${digest.hex()}"
+
+
+def verify_password(password: str, stored_password: str) -> bool:
+    """Verifica hashes nuevos y permite migrar usuarios antiguos en claro."""
+    if not stored_password.startswith("pbkdf2_sha256$"):
+        return hmac.compare_digest(password, stored_password)
+    try:
+        algorithm, iterations, salt_hex, digest_hex = stored_password.split("$", 3)
+        if algorithm != "pbkdf2_sha256":
+            return False
+        digest = hashlib.pbkdf2_hmac(
+            "sha256", password.encode(), bytes.fromhex(salt_hex), int(iterations)
+        )
+        return hmac.compare_digest(digest.hex(), digest_hex)
+    except (ValueError, TypeError):
+        return False
 
 try:
     from reportlab.lib import colors  # type: ignore[reportMissingImports]
@@ -244,10 +271,7 @@ class State(rx.State):
 
     @rx.var
     def municipality_detail_display(self) -> list[dict]:
-        if self.municipality_detail_page_size == 0:
-            return self.municipality_detail_results
-        start = (self.municipality_detail_page - 1) * self.municipality_detail_page_size
-        return self.municipality_detail_results[start:start + self.municipality_detail_page_size]
+        return self.municipality_detail_results
 
     @rx.var
     def municipality_detail_page_size_label(self) -> str:
@@ -323,14 +347,17 @@ class State(rx.State):
     def set_municipality_detail_page_size(self, value: str):
         self.municipality_detail_page_size = 0 if value == "all" else int(value)
         self.municipality_detail_page = 1
+        self._load_municipality_detail_page()
 
     def next_municipality_detail_page(self):
         if self.municipality_detail_page < self.municipality_detail_total_pages:
             self.municipality_detail_page += 1
+            self._load_municipality_detail_page()
 
     def previous_municipality_detail_page(self):
         if self.municipality_detail_page > 1:
             self.municipality_detail_page -= 1
+            self._load_municipality_detail_page()
 
     def remove_municipality_filter(self, index: int):
         if len(self.municipality_filters) > 1:
@@ -396,6 +423,7 @@ class State(rx.State):
     def crear_usuario_inicial(self):
         """Crea el usuario administrador inicial si no existe."""
         try:
+            initial_password = os.getenv("INITIAL_ADMIN_PASSWORD", "admin123")
             with rx.session() as session:
                 admin_existente = session.exec(
                     sqlmodel.select(Usuario).where(Usuario.username == "admin")
@@ -403,7 +431,7 @@ class State(rx.State):
                 if not admin_existente:
                     admin = Usuario(
                         username="admin",
-                        password="admin123",
+                        password=hash_password(initial_password),
                         rol="admin",
                         activo=True,
                         can_consultar=True,
@@ -434,9 +462,14 @@ class State(rx.State):
             user = session.exec(
                 sqlmodel.select(Usuario).where(Usuario.username == user_input)
             ).first()
-            if not user or user.password != pass_input:
+            if not user or not verify_password(pass_input, user.password):
                 self.error_msg = "Usuario o contraseña incorrectos."
                 return
+
+            if not user.password.startswith("pbkdf2_sha256$"):
+                user.password = hash_password(pass_input)
+                session.add(user)
+                session.commit()
 
             if not user.activo:
                 self.error_msg = "El usuario se encuentra inactivo. Comuníquese con el administrador."
@@ -521,7 +554,7 @@ class State(rx.State):
                 db_user.can_consultar = self.edit_user_can_consultar
                 db_user.can_imprimir = self.edit_user_can_imprimir
                 if self.edit_password_input.strip():
-                    db_user.password = self.edit_password_input.strip()
+                    db_user.password = hash_password(self.edit_password_input.strip())
                 session.add(db_user)
                 session.commit()
                 if self.is_logged_in and self.logged_user_id == db_user.id:
@@ -550,7 +583,7 @@ class State(rx.State):
 
             new_user = Usuario(
                 username=self.new_user_username.strip(),
-                password=self.new_user_password.strip(),
+                password=hash_password(self.new_user_password.strip()),
                 rol=self.new_user_rol,
                 activo=True,
                 can_consultar=self.new_user_can_consultar,
@@ -853,8 +886,36 @@ class State(rx.State):
             "longitud": float(persona.longitud) if persona.longitud is not None else None,
         }
 
+    def _active_municipality_indices(self) -> list[int]:
+        return [
+            index for index, item in enumerate(self.municipality_filters)
+            if item["municipio"].strip() or self.municipality_selected_cvs[index]
+        ]
+
+    def _load_municipality_detail_page(self):
+        """Carga solo la página solicitada desde PostgreSQL."""
+        active_indices = self._active_municipality_indices()
+        if not active_indices:
+            self.municipality_detail_results = []
+            self.municipality_detail_total = 0
+            return
+        with rx.session() as session:
+            condition = self._build_municipality_condition(active_indices)
+            count_query = sqlmodel.select(sqlmodel.func.count(Persona.id)).where(condition)
+            self.municipality_detail_total = session.exec(count_query).one()
+            detail_query = (
+                sqlmodel.select(Persona)
+                .where(condition)
+                .order_by(Persona.nombre_municipio, Persona.nombre_cv, Persona.id)
+            )
+            if self.municipality_detail_page_size:
+                offset = (self.municipality_detail_page - 1) * self.municipality_detail_page_size
+                detail_query = detail_query.offset(offset).limit(self.municipality_detail_page_size)
+            personas = session.exec(detail_query).all()
+            self.municipality_detail_results = [self._persona_to_dict(persona) for persona in personas]
+
     def buscar_detalle_municipio(self):
-        """Carga todos los ciudadanos de los filtros elegidos solo bajo demanda."""
+        """Inicia la tabla detallada bajo demanda, paginada en PostgreSQL."""
         active_indices = [
             index for index, item in enumerate(self.municipality_filters)
             if item["municipio"].strip() or self.municipality_selected_cvs[index]
@@ -863,16 +924,9 @@ class State(rx.State):
             return
         self.municipality_detail_is_loading = True
         try:
-            with rx.session() as session:
-                personas = session.exec(
-                    sqlmodel.select(Persona)
-                    .where(self._build_municipality_condition(active_indices))
-                    .order_by(Persona.nombre_municipio, Persona.nombre_cv, Persona.id)
-                ).all()
-                self.municipality_detail_results = [self._persona_to_dict(persona) for persona in personas]
-                self.municipality_detail_total = len(self.municipality_detail_results)
-                self.municipality_detail_page = 1
-                self.municipality_detail_prompt = False
+            self.municipality_detail_page = 1
+            self._load_municipality_detail_page()
+            self.municipality_detail_prompt = False
         finally:
             self.municipality_detail_is_loading = False
 
@@ -888,7 +942,7 @@ class State(rx.State):
 
     def exportar_detalle_municipio_csv(self):
         """Descarga todos los registros del detalle municipal, no solo la página actual."""
-        if not self.municipality_detail_results:
+        if not self.municipality_detail_total:
             return rx.toast.warning("No hay resultados detallados para exportar.")
 
         headers = [
@@ -900,8 +954,20 @@ class State(rx.State):
         output = io.StringIO()
         writer = csv.writer(output)
         writer.writerow(headers)
-        for result in self.municipality_detail_results:
-            writer.writerow([result.get(header, "") if result.get(header) is not None else "" for header in headers])
+        active_indices = self._active_municipality_indices()
+        with rx.session() as session:
+            query = (
+                sqlmodel.select(Persona)
+                .where(self._build_municipality_condition(active_indices))
+                .order_by(Persona.nombre_municipio, Persona.nombre_cv, Persona.id)
+                .execution_options(yield_per=5000)
+            )
+            for persona in session.exec(query):
+                result = self._persona_to_dict(persona)
+                writer.writerow([
+                    result.get(header, "") if result.get(header) is not None else ""
+                    for header in headers
+                ])
 
         csv_data = output.getvalue().encode("utf-8-sig")
         output.close()
