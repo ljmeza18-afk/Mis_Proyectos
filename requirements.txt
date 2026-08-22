@@ -1,2 +1,6 @@
-
 reflex==0.9.7
+sqlmodel
+reportlab
+qrcode
+pillow
+psycopg2-binary

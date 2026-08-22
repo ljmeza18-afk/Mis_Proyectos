@@ -1,4 +1,6 @@
 .web
+.venv/
+uploaded_files/
 *.db
 __pycache__/
 assets/external/

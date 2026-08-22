@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mapa de resultados</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="">
+  <style>
+    html, body, #map { height: 100%; margin: 0; }
+    body { font-family: system-ui, sans-serif; }
+    .leaflet-popup-content { min-width: 230px; line-height: 1.45; }
+    .popup-title { color: #1a365d; font-size: 1.05rem; font-weight: 700; margin-bottom: 8px; }
+    .popup-row { margin: 3px 0; }
+    .popup-label { color: #4a5568; font-weight: 600; }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
+  <script>
+    const params = new URLSearchParams(window.location.search);
+    const mapMode = params.get("mode") || "search";
+    let points = [];
+    try { points = JSON.parse(params.get("data") || "[]"); } catch (error) { points = []; }
+
+    const validPoints = points.filter(point => Number.isFinite(Number(point.latitud)) && Number.isFinite(Number(point.longitud)));
+    const map = L.map("map").setView([7.5, -66.5], 6);
+    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      maxZoom: 19,
+      attribution: "&copy; OpenStreetMap contributors"
+    }).addTo(map);
+
+    const escapeHtml = value => String(value ?? "")
+      .replaceAll("&", "&amp;").replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;").replaceAll('"', "&quot;")
+      .replaceAll("'", "&#039;");
+
+    const labels = {
+      v_e: "Nacionalidad", cedula: "Cédula", nombre_completo: "Nombre Completo",
+      primer_nombre: "Primer Nombre", primer_apellido: "Primer Apellido",
+      fecha_nacimiento: "Fecha de Nacimiento", genero: "Género",
+      nombre_estado: "Estado", nombre_municipio: "Municipio", parroquia: "Parroquia",
+      codigo_cv: "Código Centro de Votación", direccion_cv: "Dirección",
+      latitud: "Latitud", longitud: "Longitud"
+    };
+
+    const municipalityColors = {
+      "MP. ARISMENDI": "#2563eb", "MP. DIAZ": "#dc2626", "MP. GOMEZ": "#16a34a",
+      "MP. MANEIRO": "#9333ea", "MP. MARCANO": "#ea580c", "MP. MARIÑO": "#0891b2",
+      "MP.PENIN. DE MACANAO": "#ca8a04", "MP.VILLALBA(I.COCHE)": "#db2777",
+      "MP. TUBORES": "#4f46e5", "MP.ANTOLIN DEL CAMPO": "#65a30d", "MP. GARCIA": "#c026d3"
+    };
+    const municipalityColor = municipality => {
+      const name = String(municipality || "").trim().toUpperCase();
+      return municipalityColors[name] || "#475569";
+    };
+
+    const municipalityPopupFields = ["nombre_estado", "nombre_municipio", "estado", "municipio", "codigo_cv", "nombre_cv", "direccion_cv"];
+
+    validPoints.forEach(point => {
+      const title = escapeHtml(point.nombre_cv || "Centro de votación sin nombre");
+      const popupEntries = mapMode === "municipality"
+        ? municipalityPopupFields.map(key => [key, point[key]])
+        : Object.entries(point).filter(([key]) => key !== "id" && key !== "nombre_cv");
+      const rows = popupEntries
+        .filter(([, value]) => value !== null && value !== "")
+        .map(([key, value]) => `<div class="popup-row"><span class="popup-label">${escapeHtml(labels[key] || key)}:</span> ${escapeHtml(value)}</div>`)
+        .join("");
+      const markerColor = municipalityColor(point.nombre_municipio);
+      L.circleMarker([Number(point.latitud), Number(point.longitud)], {
+        radius: 8,
+        color: markerColor,
+        fillColor: markerColor,
+        fillOpacity: 0.8,
+        weight: 2
+      })
+        .addTo(map)
+        .bindPopup(`<div class="popup-title">${title}</div>${rows}`);
+    });
+
+    if (validPoints.length > 0) {
+      map.fitBounds(L.latLngBounds(validPoints.map(point => [Number(point.latitud), Number(point.longitud)])), { padding: [30, 30] });
+    }
+  </script>
+</body>
+</html>

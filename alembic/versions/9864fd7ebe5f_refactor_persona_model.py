@@ -39,24 +39,16 @@ def upgrade() -> None:
 
     with op.batch_alter_table('persona', schema=None) as batch_op:
         # 1. Añadir todas las nuevas columnas, permitiendo nulos temporalmente
-        batch_op.add_column(sa.Column('genero', sa.String(1), nullable=True))
-        batch_op.add_column(sa.Column('nombre_estado', sa.String(50), nullable=True))
-        batch_op.add_column(sa.Column('nombre_municipio', sa.String(100), nullable=True))
-        batch_op.add_column(sa.Column('nombre_cv', sa.String(255), nullable=True))
-        batch_op.add_column(sa.Column('direccion_cv', sa.Text(), nullable=True))
+        batch_op.add_column(sa.Column('genero', sa.String(1), nullable=False, server_default=''))
+        batch_op.add_column(sa.Column('nombre_estado', sa.String(50), nullable=False, server_default=''))
+        batch_op.add_column(sa.Column('nombre_municipio', sa.String(100), nullable=False, server_default=''))
+        batch_op.add_column(sa.Column('nombre_cv', sa.String(255), nullable=False, server_default=''))
+        batch_op.add_column(sa.Column('direccion_cv', sa.Text(), nullable=False, server_default=''))
         batch_op.add_column(sa.Column('latitud', sa.Numeric(10, 8), nullable=True))
         batch_op.add_column(sa.Column('longitud', sa.Numeric(11, 8), nullable=True))
 
     # 2. Copiar datos de la columna 'sexo' a la nueva 'genero'
     op.execute('UPDATE persona SET genero = sexo')
-
-    # 2.1. Rellenar con valores por defecto las nuevas columnas de texto para evitar errores de nulos.
-    #      Esto es crucial para que la posterior restricción NOT NULL no falle en datos existentes.
-    op.execute("UPDATE persona SET nombre_estado = '' WHERE nombre_estado IS NULL")
-    op.execute("UPDATE persona SET nombre_municipio = '' WHERE nombre_municipio IS NULL")
-    op.execute("UPDATE persona SET nombre_cv = '' WHERE nombre_cv IS NULL")
-    op.execute("UPDATE persona SET direccion_cv = '' WHERE direccion_cv IS NULL")
-    op.execute("UPDATE persona SET genero = '' WHERE genero IS NULL")
 
     with op.batch_alter_table('persona', schema=None) as batch_op:
         # 3. Eliminar la vieja columna 'sexo'
@@ -117,13 +109,6 @@ def upgrade() -> None:
             type_=sa.Integer(),
             nullable=True,
             postgresql_using="NULLIF(parroquia, '')::integer")
-
-        # 17. Hacer que las nuevas columnas de texto no acepten nulos y tengan un valor por defecto
-        batch_op.alter_column('genero', existing_type=sa.String(1), type_=sa.String(1), nullable=False, server_default='')
-        batch_op.alter_column('nombre_estado', existing_type=sa.String(50), type_=sa.String(50), nullable=False, server_default='')
-        batch_op.alter_column('nombre_municipio', existing_type=sa.String(100), type_=sa.String(100), nullable=False, server_default='')
-        batch_op.alter_column('nombre_cv', existing_type=sa.String(255), type_=sa.String(255), nullable=False, server_default='')
-        batch_op.alter_column('direccion_cv', existing_type=sa.Text(), type_=sa.Text(), nullable=False, server_default='')
 
         # 18. Latitud y Longitud ya fueron añadidas con el tipo correcto (Numeric) y nullable=True.
         # No se necesita alter_column adicional para ellas si ya se añadieron correctamente.
