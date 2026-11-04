@@ -1,0 +1,10 @@
+__pycache__/
+*.db
+.web
+*.py[cod]
+.states
+assets/external/
+.venv/
+venv/
+.ruff_cache/
+*.log
